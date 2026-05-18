@@ -1,0 +1,27 @@
+<p>Dear {{ recipient_name }},</p>
+</br>
+
+<p>
+  The {% if role_name %}<b>{{ role_name }}</b> role{% else %}a role{% endif %}
+  has been <b>granted</b> to
+  {% if target_kind == 'group' %}group {% endif %}<b>{{ target_name }}</b>
+  on project <b>{{ project_name }}</b>.
+</p>
+</br>
+
+<p>
+  You are receiving this message as a tenant manager of
+  <b>{{ project_name }}</b>. Other project members have been CC'd.
+</p>
+</br>
+
+<p>
+  If this change was unexpected, please reply to this email or contact
+  Nectar support.
+</p>
+</br>
+
+<p>
+  Kind Regards,<br/>
+  Nectar Research Cloud Team.
+</p>

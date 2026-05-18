@@ -1,0 +1,11 @@
+pbr
+oslo.config
+oslo.context
+oslo.log
+oslo.messaging
+cotyledon
+stevedore
+Jinja2
+keystoneauth1
+python-keystoneclient
+taynacclient>=1.2.0

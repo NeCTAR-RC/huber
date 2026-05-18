@@ -1,0 +1,9 @@
+[run]
+omit =
+   huber/cmd/*
+   huber/common/clients.py
+   huber/common/keystone.py
+   huber/common/service.py
+   huber/notification/consumer.py
+   huber/version.py
+   huber/tests/*
