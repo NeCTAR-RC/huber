@@ -330,6 +330,43 @@ class TestProjectMembershipHandler(test_base.TestCase):
         )
         self.taynac.messages.send.assert_called_once()
 
+    def test_body_includes_members_table(self):
+        tm = _user("u-tm", "tm@example.com", "Alice TM")
+        member = _user("u-m", "m@example.com", "Bob Member")
+        reader = _user("u-r", "r@example.com", "Carol Reader")
+        self._wire_users([tm, member, reader])
+        self.ks.role_assignments.list.return_value = [
+            _assignment("u-tm", TM_ROLE_ID),
+            _assignment("u-m", MEMBER_ROLE_ID),
+            # User holding two roles — should appear once with both roles.
+            _assignment("u-r", MEMBER_ROLE_ID),
+            _assignment("u-r", OTHER_ROLE_ID),
+        ]
+
+        self.handler.handle(
+            _event(
+                pm.CREATED_EVENT,
+                {"project": "p-1", "user": "u-m", "role": MEMBER_ROLE_ID},
+            )
+        )
+
+        body = self.taynac.messages.send.call_args.kwargs["body"]
+        # Table headings.
+        self.assertIn("<table", body)
+        self.assertIn("<th align=\"left\">User</th>", body)
+        self.assertIn("<th align=\"left\">Email</th>", body)
+        self.assertIn("<th align=\"left\">Roles</th>", body)
+        # Each user appears in a row.
+        self.assertIn("Alice TM", body)
+        self.assertIn("tm@example.com", body)
+        self.assertIn("Bob Member", body)
+        self.assertIn("Carol Reader", body)
+        # Carol has both roles, comma-joined.
+        # role names are sorted, so reader > Member -> "Member, reader"
+        self.assertIn("Member, reader", body)
+        # Rows sorted by name — Alice should appear before Bob.
+        self.assertLess(body.index("Alice TM"), body.index("Bob Member"))
+
     def test_matches_only_role_assignment_events(self):
         self.assertTrue(self.handler.matches(pm.CREATED_EVENT))
         self.assertTrue(self.handler.matches(pm.DELETED_EVENT))

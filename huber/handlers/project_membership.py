@@ -132,7 +132,9 @@ class ProjectMembershipHandler(base.HandlerBase):
             target = ks.groups.get(target_group_id)
             target_kind = "group"
 
-        tenantmanagers, cc_users = self._collect_audience(ks, project_id)
+        tenantmanagers, cc_users, members_table = (
+            self._collect_project_membership(ks, project_id)
+        )
         if not tenantmanagers:
             LOG.warning(
                 "No %s on project %s; skipping %s notification "
@@ -173,6 +175,7 @@ class ProjectMembershipHandler(base.HandlerBase):
             target_kind=target_kind,
             project_name=getattr(project, "name", project_id),
             role_name=getattr(role, "name", None) if role else None,
+            members_table=members_table,
         )
 
         try:
@@ -203,20 +206,25 @@ class ProjectMembershipHandler(base.HandlerBase):
         )
 
     @staticmethod
-    def _collect_audience(ks, project_id):
-        """Return ``(tenantmanagers, cc_users)`` as keystone User objects.
+    def _collect_project_membership(ks, project_id):
+        """Single pass over the project's effective role assignments.
 
-        ``tenantmanagers`` preserves the order keystone returned the
-        assignments in, so ``[0]`` is deterministic relative to keystone.
-        ``cc_users`` contains every user holding the tenantmanager or
-        member role on the project, deduplicated by id.
+        Returns ``(tenantmanagers, cc_users, members_table)``:
+
+        * ``tenantmanagers`` — User objects in keystone API order so
+          ``[0]`` is deterministic.
+        * ``cc_users`` — every user with the tenantmanager or member role,
+          deduplicated by id.
+        * ``members_table`` — list of ``{"name", "email", "roles"}`` dicts
+          covering every user holding any role on the project, sorted by
+          display name. ``roles`` is the deduped list of role names.
         """
         tm_name = CONF.project_membership.tenantmanager_role.lower()
         member_name = CONF.project_membership.member_role.lower()
 
-        role_names = {}
-        tenantmanager_ids = []
-        cc_ids = set()
+        role_names = {}  # role_id -> role.name (original case)
+        user_to_role_ids = {}  # user_id -> set of role_ids
+        tenantmanager_ids = []  # order-preserving
 
         for a in ks.role_assignments.list(project=project_id, effective=True):
             role_ref = getattr(a, "role", None)
@@ -230,19 +238,41 @@ class ProjectMembershipHandler(base.HandlerBase):
 
             if role_id not in role_names:
                 role_names[role_id] = ks.roles.get(role_id).name
-            name = role_names[role_id].lower()
+            normalized = role_names[role_id].lower()
 
-            if name == tm_name:
-                if user_id not in tenantmanager_ids:
-                    tenantmanager_ids.append(user_id)
-                cc_ids.add(user_id)
-            elif name == member_name:
-                cc_ids.add(user_id)
+            user_to_role_ids.setdefault(user_id, set()).add(role_id)
 
-        user_cache = {uid: ks.users.get(uid) for uid in cc_ids}
+            if normalized == tm_name and user_id not in tenantmanager_ids:
+                tenantmanager_ids.append(user_id)
+
+        # Fetch each user once.
+        user_cache = {uid: ks.users.get(uid) for uid in user_to_role_ids}
+
         tenantmanagers = [user_cache[uid] for uid in tenantmanager_ids]
-        cc_users = list(user_cache.values())
-        return tenantmanagers, cc_users
+
+        cc_user_ids = {
+            uid
+            for uid, rids in user_to_role_ids.items()
+            if any(
+                role_names[rid].lower() in (tm_name, member_name)
+                for rid in rids
+            )
+        }
+        cc_users = [user_cache[uid] for uid in cc_user_ids]
+
+        members_table = []
+        for uid, rids in user_to_role_ids.items():
+            user = user_cache[uid]
+            members_table.append(
+                {
+                    "name": _display_name(user),
+                    "email": getattr(user, "email", "") or "",
+                    "roles": sorted({role_names[rid] for rid in rids}),
+                }
+            )
+        members_table.sort(key=lambda row: row["name"].lower())
+
+        return tenantmanagers, cc_users, members_table
 
 
 def _ref_id(ref):

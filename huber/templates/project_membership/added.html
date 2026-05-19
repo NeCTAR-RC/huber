@@ -10,6 +10,25 @@
 </br>
 
 <p>
+  Current members of <b>{{ project_name }}</b>:
+</p>
+<table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse;">
+  <tr>
+    <th align="left">User</th>
+    <th align="left">Email</th>
+    <th align="left">Roles</th>
+  </tr>
+  {% for row in members_table %}
+  <tr>
+    <td>{{ row.name }}</td>
+    <td>{{ row.email }}</td>
+    <td>{{ row.roles | join(', ') }}</td>
+  </tr>
+  {% endfor %}
+</table>
+</br>
+
+<p>
   You are receiving this message as a tenant manager of
   <b>{{ project_name }}</b>. Other project members have been CC'd.
 </p>
