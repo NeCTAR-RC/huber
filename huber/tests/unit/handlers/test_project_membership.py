@@ -31,8 +31,8 @@ def _stub(**attrs):
     return obj
 
 
-def _user(uid, email, name=None):
-    return _stub(id=uid, email=email, name=name or uid)
+def _user(uid, email, name=None, enabled=True):
+    return _stub(id=uid, email=email, name=name or uid, enabled=enabled)
 
 
 def _assignment(user_id, role_id):
@@ -366,6 +366,94 @@ class TestProjectMembershipHandler(test_base.TestCase):
         self.assertIn("Member, reader", body)
         # Rows sorted by name — Alice should appear before Bob.
         self.assertLess(body.index("Alice TM"), body.index("Bob Member"))
+
+    def test_disabled_user_is_not_in_members_table(self):
+        tm = _user("u-tm", "tm@example.com", "Alice TM")
+        member = _user("u-m", "m@example.com", "Bob Member")
+        disabled = _user(
+            "u-off", "off@example.com", "Carol Off", enabled=False
+        )
+        self._wire_users([tm, member, disabled])
+        self.ks.role_assignments.list.return_value = [
+            _assignment("u-tm", TM_ROLE_ID),
+            _assignment("u-m", MEMBER_ROLE_ID),
+            _assignment("u-off", MEMBER_ROLE_ID),
+        ]
+
+        self.handler.handle(
+            _event(
+                pm.CREATED_EVENT,
+                {"project": "p-1", "user": "u-m", "role": MEMBER_ROLE_ID},
+            )
+        )
+
+        body = self.taynac.messages.send.call_args.kwargs["body"]
+        self.assertIn("Alice TM", body)
+        self.assertIn("Bob Member", body)
+        self.assertNotIn("Carol Off", body)
+        self.assertNotIn("off@example.com", body)
+
+    def test_disabled_tenantmanager_is_skipped_for_primary(self):
+        # First TM is disabled — primary recipient falls through to the
+        # next enabled tenantmanager.
+        tm_off = _user("u-off", "off@example.com", enabled=False)
+        tm_on = _user("u-on", "on@example.com")
+        target = _user("u-new", "new@example.com")
+        self._wire_users([tm_off, tm_on, target])
+        self.ks.role_assignments.list.return_value = [
+            _assignment("u-off", TM_ROLE_ID),
+            _assignment("u-on", TM_ROLE_ID),
+            _assignment("u-new", MEMBER_ROLE_ID),
+        ]
+
+        self.handler.handle(
+            _event(
+                pm.CREATED_EVENT,
+                {"project": "p-1", "user": "u-new", "role": MEMBER_ROLE_ID},
+            )
+        )
+
+        call = self.taynac.messages.send.call_args
+        self.assertEqual("on@example.com", call.kwargs["recipient"])
+        self.assertNotIn("off@example.com", call.kwargs["cc"])
+
+    def test_disabled_user_is_dropped_from_cc(self):
+        tm = _user("u-tm", "tm@example.com")
+        member = _user("u-m", "m@example.com")
+        disabled = _user("u-off", "off@example.com", enabled=False)
+        self._wire_users([tm, member, disabled])
+        self.ks.role_assignments.list.return_value = [
+            _assignment("u-tm", TM_ROLE_ID),
+            _assignment("u-m", MEMBER_ROLE_ID),
+            _assignment("u-off", MEMBER_ROLE_ID),
+        ]
+
+        self.handler.handle(
+            _event(
+                pm.CREATED_EVENT,
+                {"project": "p-1", "user": "u-m", "role": MEMBER_ROLE_ID},
+            )
+        )
+
+        call = self.taynac.messages.send.call_args
+        self.assertEqual(["m@example.com"], call.kwargs["cc"])
+
+    def test_all_tenantmanagers_disabled_skips_send(self):
+        tm_off = _user("u-off", "off@example.com", enabled=False)
+        member = _user("u-m", "m@example.com")
+        self._wire_users([tm_off, member])
+        self.ks.role_assignments.list.return_value = [
+            _assignment("u-off", TM_ROLE_ID),
+            _assignment("u-m", MEMBER_ROLE_ID),
+        ]
+
+        self.handler.handle(
+            _event(
+                pm.CREATED_EVENT,
+                {"project": "p-1", "user": "u-m", "role": MEMBER_ROLE_ID},
+            )
+        )
+        self.taynac.messages.send.assert_not_called()
 
     def test_matches_only_role_assignment_events(self):
         self.assertTrue(self.handler.matches(pm.CREATED_EVENT))

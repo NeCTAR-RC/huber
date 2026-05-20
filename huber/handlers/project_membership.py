@@ -248,12 +248,20 @@ class ProjectMembershipHandler(base.HandlerBase):
         # Fetch each user once.
         user_cache = {uid: ks.users.get(uid) for uid in user_to_role_ids}
 
-        tenantmanagers = [user_cache[uid] for uid in tenantmanager_ids]
+        # Disabled keystone users can't read email and shouldn't be on the
+        # to/cc lists. Default to enabled when the attribute is missing.
+        def _enabled(uid):
+            return bool(getattr(user_cache[uid], "enabled", True))
+
+        tenantmanagers = [
+            user_cache[uid] for uid in tenantmanager_ids if _enabled(uid)
+        ]
 
         cc_user_ids = {
             uid
             for uid, rids in user_to_role_ids.items()
-            if any(
+            if _enabled(uid)
+            and any(
                 role_names[rid].lower() in (tm_name, member_name)
                 for rid in rids
             )
@@ -262,6 +270,8 @@ class ProjectMembershipHandler(base.HandlerBase):
 
         members_table = []
         for uid, rids in user_to_role_ids.items():
+            if not _enabled(uid):
+                continue
             user = user_cache[uid]
             members_table.append(
                 {
