@@ -11,15 +11,10 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import os
-
-import jinja2
 from oslo_config import cfg
 from oslo_log import log as logging
 
-from huber.common import clients
-from huber.common import keystone
-from huber.handlers import base
+from huber.handlers import common
 
 
 CONF = cfg.CONF
@@ -59,7 +54,7 @@ CREATED_EVENT = "identity.role_assignment.created"
 DELETED_EVENT = "identity.role_assignment.deleted"
 
 
-class ProjectMembershipHandler(base.HandlerBase):
+class ProjectMembershipHandler(common.TaynacHandlerBase):
     """Notify a project's tenant manager when membership changes.
 
     Triggered by keystone's ``identity.role_assignment.created`` and
@@ -75,26 +70,6 @@ class ProjectMembershipHandler(base.HandlerBase):
     """
 
     event_types = [CREATED_EVENT, DELETED_EVENT]
-
-    TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), "..", "templates")
-
-    def __init__(self):
-        self._session = None
-        self._ks = None
-        self._taynac = None
-        self._jinja = jinja2.Environment(
-            loader=jinja2.FileSystemLoader(self.TEMPLATE_DIR),
-            autoescape=jinja2.select_autoescape(["html", "tmpl"]),
-        )
-
-    # Lazy client construction so the handler can be imported without a
-    # live keystone — useful for tests and config generation.
-    def _clients(self):
-        if self._ks is None:
-            self._session = keystone.KeystoneSession().get_session()
-            self._ks = clients.get_keystoneclient(self._session)
-            self._taynac = clients.get_taynacclient(self._session)
-        return self._ks, self._taynac
 
     def handle(self, event):
         action = "added" if event.event_type == CREATED_EVENT else "removed"
@@ -166,12 +141,10 @@ class ProjectMembershipHandler(base.HandlerBase):
             }
         )
 
-        template = self._jinja.get_template(
-            f"project_membership/{action}.html"
-        )
-        body = template.render(
-            recipient_name=_display_name(primary),
-            target_name=_display_name(target),
+        body = self.render(
+            f"project_membership/{action}.html",
+            recipient_name=common.display_name(primary),
+            target_name=common.display_name(target),
             target_kind=target_kind,
             project_name=getattr(project, "name", project_id),
             role_name=getattr(role, "name", None) if role else None,
@@ -231,8 +204,8 @@ class ProjectMembershipHandler(base.HandlerBase):
             user_ref = getattr(a, "user", None)
             if not role_ref or not user_ref:
                 continue
-            role_id = _ref_id(role_ref)
-            user_id = _ref_id(user_ref)
+            role_id = common.ref_id(role_ref)
+            user_id = common.ref_id(user_ref)
             if not role_id or not user_id:
                 continue
 
@@ -275,7 +248,7 @@ class ProjectMembershipHandler(base.HandlerBase):
             user = user_cache[uid]
             members_table.append(
                 {
-                    "name": _display_name(user),
+                    "name": common.display_name(user),
                     "email": getattr(user, "email", "") or "",
                     "roles": sorted({role_names[rid] for rid in rids}),
                 }
@@ -283,19 +256,3 @@ class ProjectMembershipHandler(base.HandlerBase):
         members_table.sort(key=lambda row: row["name"].lower())
 
         return tenantmanagers, cc_users, members_table
-
-
-def _ref_id(ref):
-    """Extract an id from a keystone {'id': ...} dict or scalar."""
-    if isinstance(ref, dict):
-        return ref.get("id")
-    return ref
-
-
-def _display_name(obj):
-    """Best-effort human-readable name for a keystone user or group."""
-    for attr in ("full_name", "name", "id"):
-        value = getattr(obj, attr, None)
-        if value:
-            return value
-    return "(unknown)"

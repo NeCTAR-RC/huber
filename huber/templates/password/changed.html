@@ -1,0 +1,22 @@
+<p>Dear {{ recipient_name }},</p>
+</br>
+
+<p>
+  {% if self_service %}
+  Your Nectar password has just been <b>changed</b>.
+  {% else %}
+  Your Nectar password has just been <b>reset</b> by an administrator.
+  {% endif %}
+</p>
+</br>
+
+<p>
+  If you did <b>not</b> request this change, please reply to this email
+  or contact Nectar support at support@nectar.org.au immediately.
+</p>
+</br>
+
+<p>
+  Kind Regards,<br/>
+  ARDC Nectar Research Cloud Team.
+</p>
