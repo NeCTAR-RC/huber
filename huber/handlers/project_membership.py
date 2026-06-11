@@ -46,6 +46,15 @@ project_membership_opts = [
             "on the notification. Compared case-insensitively."
         ),
     ),
+    cfg.StrOpt(
+        "reader_role",
+        default="reader",
+        help=(
+            "Name of the keystone role that identifies read-only project "
+            "members. Compared case-insensitively against role names "
+            "from keystone."
+        ),
+    ),
 ]
 cfg.CONF.register_opts(project_membership_opts, group="project_membership")
 
@@ -61,12 +70,17 @@ class ProjectMembershipHandler(common.TaynacHandlerBase):
     ``identity.role_assignment.deleted`` notifications. For each event we:
 
     1. Resolve the affected user/group, project, and role via keystone.
+       Only the tenantmanager, member, and reader roles are notifiable;
+       events for any other role are ignored.
     2. Find the project's tenant managers and ordinary members (effective
        assignments — group memberships are expanded to users).
     3. Send **one** taynac message:
         * ``recipient`` = first tenant manager (by keystone API order)
         * ``cc`` = every other user holding the tenantmanager or member
           role on the project
+
+    If nobody would be CC'd (the tenant manager is the only recipient),
+    no message is sent.
     """
 
     event_types = [CREATED_EVENT, DELETED_EVENT]
@@ -97,8 +111,24 @@ class ProjectMembershipHandler(common.TaynacHandlerBase):
         role_id = event.traits.get("role")
 
         ks, taynac = self._clients()
-        project = ks.projects.get(project_id)
         role = ks.roles.get(role_id) if role_id else None
+        role_name = getattr(role, "name", None) if role else None
+        notifiable_roles = (
+            CONF.project_membership.tenantmanager_role.lower(),
+            CONF.project_membership.member_role.lower(),
+            CONF.project_membership.reader_role.lower(),
+        )
+        if not role_name or role_name.lower() not in notifiable_roles:
+            LOG.debug(
+                "Skipping %s (message_id=%s): role %s is not a "
+                "notifiable role",
+                event.event_type,
+                event.message_id,
+                role_name or role_id,
+            )
+            return
+
+        project = ks.projects.get(project_id)
 
         if target_user_id:
             target = ks.users.get(target_user_id)
@@ -140,6 +170,13 @@ class ProjectMembershipHandler(common.TaynacHandlerBase):
                 if getattr(u, "email", None) and u.id != primary.id
             }
         )
+        if not cc_emails:
+            LOG.debug(
+                "Skipping %s (message_id=%s): only one user would be notified",
+                event.event_type,
+                event.message_id,
+            )
+            return
 
         body = self.render(
             f"project_membership/{action}.html",
@@ -147,7 +184,7 @@ class ProjectMembershipHandler(common.TaynacHandlerBase):
             target_name=common.display_name(target),
             target_kind=target_kind,
             project_name=getattr(project, "name", project_id),
-            role_name=getattr(role, "name", None) if role else None,
+            role_name=role_name,
             members_table=members_table,
         )
 

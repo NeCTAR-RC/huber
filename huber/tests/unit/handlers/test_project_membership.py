@@ -20,6 +20,7 @@ from huber.tests.unit import base as test_base
 
 TM_ROLE_ID = "role-tm"
 MEMBER_ROLE_ID = "role-mem"
+READER_ROLE_ID = "role-reader"
 OTHER_ROLE_ID = "role-other"
 
 
@@ -64,7 +65,8 @@ class TestProjectMembershipHandler(test_base.TestCase):
         self._roles = {
             TM_ROLE_ID: _stub(id=TM_ROLE_ID, name="TenantManager"),
             MEMBER_ROLE_ID: _stub(id=MEMBER_ROLE_ID, name="Member"),
-            OTHER_ROLE_ID: _stub(id=OTHER_ROLE_ID, name="reader"),
+            READER_ROLE_ID: _stub(id=READER_ROLE_ID, name="Reader"),
+            OTHER_ROLE_ID: _stub(id=OTHER_ROLE_ID, name="heat_stack_owner"),
         }
         self.ks.roles.get.side_effect = lambda rid: self._roles[rid]
 
@@ -151,22 +153,24 @@ class TestProjectMembershipHandler(test_base.TestCase):
 
     def test_other_roles_are_not_cced(self):
         tm = _user("u-tm", "tm@example.com")
-        reader = _user("u-reader", "reader@example.com")
-        self._wire_users([tm, reader])
+        member = _user("u-m", "m@example.com")
+        other = _user("u-other", "other@example.com")
+        self._wire_users([tm, member, other])
         self.ks.role_assignments.list.return_value = [
             _assignment("u-tm", TM_ROLE_ID),
-            _assignment("u-reader", OTHER_ROLE_ID),
+            _assignment("u-m", MEMBER_ROLE_ID),
+            _assignment("u-other", OTHER_ROLE_ID),
         ]
 
         self.handler.handle(
             _event(
                 pm.CREATED_EVENT,
-                {"project": "p-1", "user": "u-reader", "role": OTHER_ROLE_ID},
+                {"project": "p-1", "user": "u-m", "role": MEMBER_ROLE_ID},
             )
         )
 
         call = self.taynac.messages.send.call_args
-        self.assertEqual([], call.kwargs["cc"])
+        self.assertEqual(["m@example.com"], call.kwargs["cc"])
 
     def test_recipients_without_email_are_skipped_from_cc(self):
         tm = _user("u-tm", "tm@example.com")
@@ -248,14 +252,14 @@ class TestProjectMembershipHandler(test_base.TestCase):
 
     def test_deleted_event_uses_removed_template(self):
         tm = _user("u-tm", "tm@example.com")
-        self._wire_users([tm])
+        member = _user("u-m", "m@example.com")
         # The removed user is no longer in role_assignments.
         self.ks.role_assignments.list.return_value = [
             _assignment("u-tm", TM_ROLE_ID),
+            _assignment("u-m", MEMBER_ROLE_ID),
         ]
         target = _user("u-gone", "gone@example.com", "Gone")
-        # Patch the target lookup explicitly (different code path).
-        self._wire_users([tm, target])
+        self._wire_users([tm, member, target])
 
         self.handler.handle(
             _event(
@@ -273,9 +277,11 @@ class TestProjectMembershipHandler(test_base.TestCase):
 
     def test_group_assignment_uses_group_label(self):
         tm = _user("u-tm", "tm@example.com")
-        self._wire_users([tm])
+        member = _user("u-m", "m@example.com")
+        self._wire_users([tm, member])
         self.ks.role_assignments.list.return_value = [
             _assignment("u-tm", TM_ROLE_ID),
+            _assignment("u-m", MEMBER_ROLE_ID),
         ]
         group = _stub(id="g-1", name="science-team")
         self.ks.groups.get.return_value = group
@@ -290,6 +296,67 @@ class TestProjectMembershipHandler(test_base.TestCase):
         call = self.taynac.messages.send.call_args
         self.assertIn("science-team", call.kwargs["body"])
         self.assertIn("group", call.kwargs["body"])
+
+    def test_reader_role_triggers_notification(self):
+        tm = _user("u-tm", "tm@example.com")
+        member = _user("u-m", "m@example.com")
+        target = _user("u-new", "new@example.com")
+        self._wire_users([tm, member, target])
+        self.ks.role_assignments.list.return_value = [
+            _assignment("u-tm", TM_ROLE_ID),
+            _assignment("u-m", MEMBER_ROLE_ID),
+            _assignment("u-new", READER_ROLE_ID),
+        ]
+
+        self.handler.handle(
+            _event(
+                pm.CREATED_EVENT,
+                {"project": "p-1", "user": "u-new", "role": READER_ROLE_ID},
+            )
+        )
+
+        self.taynac.messages.send.assert_called_once()
+        body = self.taynac.messages.send.call_args.kwargs["body"]
+        self.assertIn("Reader", body)
+
+    def test_non_notifiable_role_skips_send(self):
+        self.handler.handle(
+            _event(
+                pm.CREATED_EVENT,
+                {"project": "p-1", "user": "u-new", "role": OTHER_ROLE_ID},
+            )
+        )
+        # Skipped before any membership lookup.
+        self.ks.role_assignments.list.assert_not_called()
+        self.taynac.messages.send.assert_not_called()
+
+    def test_missing_role_trait_skips_send(self):
+        self.handler.handle(
+            _event(
+                pm.CREATED_EVENT,
+                {"project": "p-1", "user": "u-new"},
+            )
+        )
+        self.ks.role_assignments.list.assert_not_called()
+        self.taynac.messages.send.assert_not_called()
+
+    def test_single_recipient_skips_send(self):
+        # The tenant manager is the only enabled user with a notifiable
+        # role, so nobody would be CC'd — no message is sent.
+        tm = _user("u-tm", "tm@example.com")
+        target = _user("u-gone", "gone@example.com")
+        self._wire_users([tm, target])
+        self.ks.role_assignments.list.return_value = [
+            _assignment("u-tm", TM_ROLE_ID),
+        ]
+
+        self.handler.handle(
+            _event(
+                pm.DELETED_EVENT,
+                {"project": "p-1", "user": "u-gone", "role": MEMBER_ROLE_ID},
+            )
+        )
+        self.taynac.messages.send.assert_not_called()
 
     def test_missing_project_trait_is_a_noop(self):
         self.handler.handle(
@@ -340,7 +407,7 @@ class TestProjectMembershipHandler(test_base.TestCase):
             _assignment("u-m", MEMBER_ROLE_ID),
             # User holding two roles — should appear once with both roles.
             _assignment("u-r", MEMBER_ROLE_ID),
-            _assignment("u-r", OTHER_ROLE_ID),
+            _assignment("u-r", READER_ROLE_ID),
         ]
 
         self.handler.handle(
@@ -361,9 +428,8 @@ class TestProjectMembershipHandler(test_base.TestCase):
         self.assertIn("tm@example.com", body)
         self.assertIn("Bob Member", body)
         self.assertIn("Carol Reader", body)
-        # Carol has both roles, comma-joined.
-        # role names are sorted, so reader > Member -> "Member, reader"
-        self.assertIn("Member, reader", body)
+        # Carol has both roles, comma-joined and sorted.
+        self.assertIn("Member, Reader", body)
         # Rows sorted by name — Alice should appear before Bob.
         self.assertLess(body.index("Alice TM"), body.index("Bob Member"))
 
