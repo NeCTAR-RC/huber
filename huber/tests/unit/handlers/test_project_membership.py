@@ -95,6 +95,11 @@ class TestProjectMembershipHandler(test_base.TestCase):
         self.taynac.messages.send.assert_called_once()
         call = self.taynac.messages.send.call_args
         self.assertEqual("tm@example.com", call.kwargs["recipient"])
+        # Subject carries the configured prefix plus the project name.
+        self.assertEqual(
+            "Nectar project role change: my-project",
+            call.kwargs["subject"],
+        )
         # cc = all member+TM users except the primary recipient.
         self.assertEqual(
             ["m@example.com", "new@example.com"],

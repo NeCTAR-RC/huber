@@ -25,7 +25,11 @@ project_membership_opts = [
     cfg.StrOpt(
         "subject",
         default="Nectar project role change",
-        help="Subject line for taynac messages sent by this handler.",
+        help=(
+            "Subject prefix for taynac messages sent by this handler. The "
+            "affected project's name is appended, giving a subject like "
+            "'Nectar project role change: my-project'."
+        ),
     ),
     cfg.StrOpt(
         "tenantmanager_role",
@@ -178,19 +182,23 @@ class ProjectMembershipHandler(common.TaynacHandlerBase):
             )
             return
 
+        project_name = getattr(project, "name", project_id)
+
         body = self.render(
             f"project_membership/{action}.html",
             recipient_name=common.display_name(primary),
             target_name=common.display_name(target),
             target_kind=target_kind,
-            project_name=getattr(project, "name", project_id),
+            project_name=project_name,
             role_name=role_name,
             members_table=members_table,
         )
 
+        subject = f"{CONF.project_membership.subject}: {project_name}"
+
         try:
             msg = taynac.messages.send(
-                subject=CONF.project_membership.subject,
+                subject=subject,
                 body=body,
                 recipient=primary_email,
                 cc=cc_emails,
