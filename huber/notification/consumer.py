@@ -32,10 +32,9 @@ class ConsumerService(cotyledon.Service):
 
     def run(self):
         LOG.info(
-            "Starting huber notification consumer on %s:%s (pool=%s)",
+            "Starting huber notification consumer on %s:%s",
             CONF.notification.exchange,
             CONF.notification.topic,
-            CONF.notification.pool,
         )
         transport = messaging.get_notification_transport(CONF)
         targets = [
@@ -51,7 +50,6 @@ class ConsumerService(cotyledon.Service):
             targets,
             [endpoint],
             executor="threading",
-            pool=CONF.notification.pool,
         )
         self.message_listener.start()
 

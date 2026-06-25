@@ -67,14 +67,6 @@ notification_opts = [
             "sink to publish to this topic."
         ),
     ),
-    cfg.StrOpt(
-        "pool",
-        default="huber",
-        help=(
-            "Notification listener pool name. Multiple huber instances "
-            "sharing a pool will load-balance messages between them."
-        ),
-    ),
 ]
 
 handlers_opts = [
