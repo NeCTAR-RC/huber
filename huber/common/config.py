@@ -81,10 +81,25 @@ handlers_opts = [
     ),
 ]
 
+sentry_opts = [
+    cfg.StrOpt(
+        "dsn",
+        secret=True,
+        help="GlitchTip/Sentry compatible DSN. When set, unhandled "
+        "exceptions and ERROR level log messages are reported.",
+    ),
+    cfg.StrOpt(
+        "environment",
+        help="Environment name reported with each event, "
+        "e.g. production or testing.",
+    ),
+]
+
 cfg.CONF.register_opts(default_opts)
 cfg.CONF.register_opts(worker_opts, group="worker")
 cfg.CONF.register_opts(notification_opts, group="notification")
 cfg.CONF.register_opts(handlers_opts, group="handlers")
+cfg.CONF.register_opts(sentry_opts, group="sentry")
 
 logging.register_options(cfg.CONF)
 
@@ -119,6 +134,7 @@ def list_opts():
         ("worker", worker_opts),
         ("notification", notification_opts),
         ("handlers", handlers_opts),
+        ("sentry", sentry_opts),
         add_auth_opts(),
     ]
 

@@ -6,6 +6,7 @@ oslo.messaging
 cotyledon
 stevedore
 Jinja2
+sentry-sdk
 keystoneauth1
 python-keystoneclient
 taynacclient>=1.2.0
