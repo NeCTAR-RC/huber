@@ -4,8 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Commands
 
-- Run all tests: `tox -e py312`
-- Run a single test: `tox -e py312 -- huber/tests/unit/notification/test_endpoints.py`
+- Run all tests: `tox -e py314`
+- Run a single test: `tox -e py314 -- huber/tests/unit/notification/test_endpoints.py`
 - Run with coverage: `tox -e cover`
 - Run lint checks: `tox -e pep8`
 - Generate config sample: `tox -e genconfig`
