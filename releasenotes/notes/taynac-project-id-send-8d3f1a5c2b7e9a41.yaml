@@ -1,0 +1,13 @@
+---
+upgrade:
+  - |
+    The project membership handler now sends taynac messages with the
+    affected project's id and lets taynac resolve the recipients from
+    keystone, instead of resolving the tenant manager and member emails
+    itself. This requires ``taynacclient>=1.6.0`` and a taynac deployment
+    that supports the message ``project_id`` field. The
+    ``[project_membership]`` tenantmanager and member role options should
+    match taynac's ``[identity]`` manager and member roles: they decide
+    which role assignment changes trigger a notification and who counts
+    towards the minimum of two recipients required to send. Notifications
+    are still suppressed when fewer than two users would be notified.

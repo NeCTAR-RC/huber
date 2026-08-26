@@ -56,6 +56,12 @@ class TestProjectMembershipHandler(test_base.TestCase):
         self.handler = pm.ProjectMembershipHandler()
         self.ks = mock.Mock()
         self.taynac = mock.Mock()
+        # Taynac echoes the recipients it resolved from the project.
+        self.taynac.messages.send.return_value = _stub(
+            backend_id="42",
+            recipient="tm@example.com",
+            cc=["m@example.com"],
+        )
         self.handler._ks = self.ks
         self.handler._taynac = self.taynac
 
@@ -74,7 +80,7 @@ class TestProjectMembershipHandler(test_base.TestCase):
         by_id = {u.id: u for u in users}
         self.ks.users.get.side_effect = lambda uid: by_id[uid]
 
-    def test_sends_one_message_to_tenantmanager(self):
+    def test_sends_one_message_with_project_id(self):
         tm = _user("u-tm", "tm@example.com", "TM")
         member = _user("u-m", "m@example.com", "Mem")
         target = _user("u-new", "new@example.com", "New")
@@ -94,16 +100,14 @@ class TestProjectMembershipHandler(test_base.TestCase):
 
         self.taynac.messages.send.assert_called_once()
         call = self.taynac.messages.send.call_args
-        self.assertEqual("tm@example.com", call.kwargs["recipient"])
+        # Recipient resolution is delegated to taynac via project_id.
+        self.assertEqual("p-1", call.kwargs["project_id"])
+        self.assertNotIn("recipient", call.kwargs)
+        self.assertNotIn("cc", call.kwargs)
         # Subject carries the configured prefix plus the project name.
         self.assertEqual(
             "Nectar project role change: my-project",
             call.kwargs["subject"],
-        )
-        # cc = all member+TM users except the primary recipient.
-        self.assertEqual(
-            ["m@example.com", "new@example.com"],
-            call.kwargs["cc"],
         )
         body = call.kwargs["body"]
         self.assertIn("granted", body)
@@ -111,60 +115,15 @@ class TestProjectMembershipHandler(test_base.TestCase):
         self.assertIn("Member", body)
         self.assertIn("New", body)
 
-    def test_first_tenantmanager_is_primary(self):
-        tm1 = _user("u-tm1", "tm1@example.com")
-        tm2 = _user("u-tm2", "tm2@example.com")
-        target = _user("u-new", "new@example.com")
-        self._wire_users([tm1, tm2, target])
-        # keystone returns tm1 before tm2; tm1 should be the primary.
-        self.ks.role_assignments.list.return_value = [
-            _assignment("u-tm1", TM_ROLE_ID),
-            _assignment("u-tm2", TM_ROLE_ID),
-            _assignment("u-new", MEMBER_ROLE_ID),
-        ]
-
-        self.handler.handle(
-            _event(
-                pm.CREATED_EVENT,
-                {"project": "p-1", "user": "u-new", "role": MEMBER_ROLE_ID},
-            )
-        )
-
-        call = self.taynac.messages.send.call_args
-        self.assertEqual("tm1@example.com", call.kwargs["recipient"])
-        # tm2 must still be CC'd; the primary must not be in cc.
-        self.assertIn("tm2@example.com", call.kwargs["cc"])
-        self.assertNotIn("tm1@example.com", call.kwargs["cc"])
-
-    def test_user_with_both_roles_appears_once_in_cc(self):
-        tm = _user("u-tm", "tm@example.com")
-        dual = _user("u-dual", "dual@example.com")
-        self._wire_users([tm, dual])
-        self.ks.role_assignments.list.return_value = [
-            _assignment("u-tm", TM_ROLE_ID),
-            _assignment("u-dual", TM_ROLE_ID),
-            _assignment("u-dual", MEMBER_ROLE_ID),
-        ]
-
-        self.handler.handle(
-            _event(
-                pm.CREATED_EVENT,
-                {"project": "p-1", "user": "u-dual", "role": MEMBER_ROLE_ID},
-            )
-        )
-
-        call = self.taynac.messages.send.call_args
-        self.assertEqual(["dual@example.com"], call.kwargs["cc"])
-
-    def test_other_roles_are_not_cced(self):
-        tm = _user("u-tm", "tm@example.com")
+    def test_sends_even_without_tenantmanager(self):
+        # Taynac owns recipient resolution (including the no-manager
+        # fallback), so huber sends regardless of who holds which role.
         member = _user("u-m", "m@example.com")
-        other = _user("u-other", "other@example.com")
-        self._wire_users([tm, member, other])
+        member2 = _user("u-m2", "m2@example.com")
+        self._wire_users([member, member2])
         self.ks.role_assignments.list.return_value = [
-            _assignment("u-tm", TM_ROLE_ID),
             _assignment("u-m", MEMBER_ROLE_ID),
-            _assignment("u-other", OTHER_ROLE_ID),
+            _assignment("u-m2", MEMBER_ROLE_ID),
         ]
 
         self.handler.handle(
@@ -174,58 +133,77 @@ class TestProjectMembershipHandler(test_base.TestCase):
             )
         )
 
+        self.taynac.messages.send.assert_called_once()
         call = self.taynac.messages.send.call_args
-        self.assertEqual(["m@example.com"], call.kwargs["cc"])
+        self.assertEqual("p-1", call.kwargs["project_id"])
 
-    def test_recipients_without_email_are_skipped_from_cc(self):
+    def test_single_recipient_skips_send(self):
+        # The tenant manager is the only enabled user with a recipient
+        # role, so nobody else would be notified — no message is sent.
         tm = _user("u-tm", "tm@example.com")
-        no_email = _user("u-x", "")
-        member = _user("u-m", "m@example.com")
-        self._wire_users([tm, no_email, member])
+        target = _user("u-gone", "gone@example.com")
+        self._wire_users([tm, target])
         self.ks.role_assignments.list.return_value = [
             _assignment("u-tm", TM_ROLE_ID),
-            _assignment("u-x", MEMBER_ROLE_ID),
-            _assignment("u-m", MEMBER_ROLE_ID),
         ]
 
         self.handler.handle(
             _event(
-                pm.CREATED_EVENT,
-                {"project": "p-1", "user": "u-m", "role": MEMBER_ROLE_ID},
-            )
-        )
-
-        call = self.taynac.messages.send.call_args
-        self.assertEqual(["m@example.com"], call.kwargs["cc"])
-
-    def test_no_tenantmanager_skips_send(self):
-        member = _user("u-m", "m@example.com")
-        self._wire_users([member])
-        self.ks.role_assignments.list.return_value = [
-            _assignment("u-m", MEMBER_ROLE_ID),
-        ]
-
-        self.handler.handle(
-            _event(
-                pm.CREATED_EVENT,
-                {"project": "p-1", "user": "u-m", "role": MEMBER_ROLE_ID},
+                pm.DELETED_EVENT,
+                {"project": "p-1", "user": "u-gone", "role": MEMBER_ROLE_ID},
             )
         )
         self.taynac.messages.send.assert_not_called()
 
-    def test_tenantmanager_without_email_skips_send(self):
-        tm = _user("u-tm", "")
-        member = _user("u-m", "m@example.com")
-        self._wire_users([tm, member])
+    def test_reader_only_users_do_not_count_as_recipients(self):
+        # Readers appear in the members table but are not notified by
+        # taynac, so a TM plus a reader is still a single recipient.
+        tm = _user("u-tm", "tm@example.com")
+        reader = _user("u-r", "r@example.com")
+        self._wire_users([tm, reader])
         self.ks.role_assignments.list.return_value = [
             _assignment("u-tm", TM_ROLE_ID),
-            _assignment("u-m", MEMBER_ROLE_ID),
+            _assignment("u-r", READER_ROLE_ID),
         ]
 
         self.handler.handle(
             _event(
                 pm.CREATED_EVENT,
-                {"project": "p-1", "user": "u-m", "role": MEMBER_ROLE_ID},
+                {"project": "p-1", "user": "u-r", "role": READER_ROLE_ID},
+            )
+        )
+        self.taynac.messages.send.assert_not_called()
+
+    def test_recipients_without_email_do_not_count(self):
+        tm = _user("u-tm", "tm@example.com")
+        no_email = _user("u-x", "")
+        self._wire_users([tm, no_email])
+        self.ks.role_assignments.list.return_value = [
+            _assignment("u-tm", TM_ROLE_ID),
+            _assignment("u-x", MEMBER_ROLE_ID),
+        ]
+
+        self.handler.handle(
+            _event(
+                pm.CREATED_EVENT,
+                {"project": "p-1", "user": "u-x", "role": MEMBER_ROLE_ID},
+            )
+        )
+        self.taynac.messages.send.assert_not_called()
+
+    def test_disabled_recipients_do_not_count(self):
+        tm = _user("u-tm", "tm@example.com")
+        disabled = _user("u-off", "off@example.com", enabled=False)
+        self._wire_users([tm, disabled])
+        self.ks.role_assignments.list.return_value = [
+            _assignment("u-tm", TM_ROLE_ID),
+            _assignment("u-off", MEMBER_ROLE_ID),
+        ]
+
+        self.handler.handle(
+            _event(
+                pm.CREATED_EVENT,
+                {"project": "p-1", "user": "u-off", "role": MEMBER_ROLE_ID},
             )
         )
         self.taynac.messages.send.assert_not_called()
@@ -251,9 +229,9 @@ class TestProjectMembershipHandler(test_base.TestCase):
             )
         )
 
+        self.taynac.messages.send.assert_called_once()
         call = self.taynac.messages.send.call_args
-        self.assertEqual("tm@example.com", call.kwargs["recipient"])
-        self.assertEqual(["m@example.com"], call.kwargs["cc"])
+        self.assertEqual("p-1", call.kwargs["project_id"])
 
     def test_deleted_event_uses_removed_template(self):
         tm = _user("u-tm", "tm@example.com")
@@ -274,11 +252,13 @@ class TestProjectMembershipHandler(test_base.TestCase):
         )
 
         call = self.taynac.messages.send.call_args
-        self.assertEqual("tm@example.com", call.kwargs["recipient"])
-        # Removed user is NOT in cc — they no longer hold the role.
-        self.assertNotIn("gone@example.com", call.kwargs["cc"])
-        self.assertIn("revoked", call.kwargs["body"])
-        self.assertIn("Gone", call.kwargs["body"])
+        self.assertEqual("p-1", call.kwargs["project_id"])
+        body = call.kwargs["body"]
+        self.assertIn("revoked", body)
+        self.assertIn("Gone", body)
+        # Removed user is NOT in the members table — they no longer hold
+        # the role.
+        self.assertNotIn("gone@example.com", body)
 
     def test_group_assignment_uses_group_label(self):
         tm = _user("u-tm", "tm@example.com")
@@ -343,24 +323,6 @@ class TestProjectMembershipHandler(test_base.TestCase):
             )
         )
         self.ks.role_assignments.list.assert_not_called()
-        self.taynac.messages.send.assert_not_called()
-
-    def test_single_recipient_skips_send(self):
-        # The tenant manager is the only enabled user with a notifiable
-        # role, so nobody would be CC'd — no message is sent.
-        tm = _user("u-tm", "tm@example.com")
-        target = _user("u-gone", "gone@example.com")
-        self._wire_users([tm, target])
-        self.ks.role_assignments.list.return_value = [
-            _assignment("u-tm", TM_ROLE_ID),
-        ]
-
-        self.handler.handle(
-            _event(
-                pm.DELETED_EVENT,
-                {"project": "p-1", "user": "u-gone", "role": MEMBER_ROLE_ID},
-            )
-        )
         self.taynac.messages.send.assert_not_called()
 
     def test_missing_project_trait_is_a_noop(self):
@@ -435,8 +397,10 @@ class TestProjectMembershipHandler(test_base.TestCase):
         self.assertIn("Carol Reader", body)
         # Carol has both roles, comma-joined and sorted.
         self.assertIn("Member, Reader", body)
-        # Rows sorted by name — Alice should appear before Bob.
-        self.assertLess(body.index("Alice TM"), body.index("Bob Member"))
+        # Rows sorted by name — Alice should appear before Bob. Scope to
+        # the table: the target's name also appears in the paragraph above.
+        table = body[body.index("<table") :]
+        self.assertLess(table.index("Alice TM"), table.index("Bob Member"))
 
     def test_disabled_user_is_not_in_members_table(self):
         tm = _user("u-tm", "tm@example.com", "Alice TM")
@@ -463,68 +427,6 @@ class TestProjectMembershipHandler(test_base.TestCase):
         self.assertIn("Bob Member", body)
         self.assertNotIn("Carol Off", body)
         self.assertNotIn("off@example.com", body)
-
-    def test_disabled_tenantmanager_is_skipped_for_primary(self):
-        # First TM is disabled — primary recipient falls through to the
-        # next enabled tenantmanager.
-        tm_off = _user("u-off", "off@example.com", enabled=False)
-        tm_on = _user("u-on", "on@example.com")
-        target = _user("u-new", "new@example.com")
-        self._wire_users([tm_off, tm_on, target])
-        self.ks.role_assignments.list.return_value = [
-            _assignment("u-off", TM_ROLE_ID),
-            _assignment("u-on", TM_ROLE_ID),
-            _assignment("u-new", MEMBER_ROLE_ID),
-        ]
-
-        self.handler.handle(
-            _event(
-                pm.CREATED_EVENT,
-                {"project": "p-1", "user": "u-new", "role": MEMBER_ROLE_ID},
-            )
-        )
-
-        call = self.taynac.messages.send.call_args
-        self.assertEqual("on@example.com", call.kwargs["recipient"])
-        self.assertNotIn("off@example.com", call.kwargs["cc"])
-
-    def test_disabled_user_is_dropped_from_cc(self):
-        tm = _user("u-tm", "tm@example.com")
-        member = _user("u-m", "m@example.com")
-        disabled = _user("u-off", "off@example.com", enabled=False)
-        self._wire_users([tm, member, disabled])
-        self.ks.role_assignments.list.return_value = [
-            _assignment("u-tm", TM_ROLE_ID),
-            _assignment("u-m", MEMBER_ROLE_ID),
-            _assignment("u-off", MEMBER_ROLE_ID),
-        ]
-
-        self.handler.handle(
-            _event(
-                pm.CREATED_EVENT,
-                {"project": "p-1", "user": "u-m", "role": MEMBER_ROLE_ID},
-            )
-        )
-
-        call = self.taynac.messages.send.call_args
-        self.assertEqual(["m@example.com"], call.kwargs["cc"])
-
-    def test_all_tenantmanagers_disabled_skips_send(self):
-        tm_off = _user("u-off", "off@example.com", enabled=False)
-        member = _user("u-m", "m@example.com")
-        self._wire_users([tm_off, member])
-        self.ks.role_assignments.list.return_value = [
-            _assignment("u-off", TM_ROLE_ID),
-            _assignment("u-m", MEMBER_ROLE_ID),
-        ]
-
-        self.handler.handle(
-            _event(
-                pm.CREATED_EVENT,
-                {"project": "p-1", "user": "u-m", "role": MEMBER_ROLE_ID},
-            )
-        )
-        self.taynac.messages.send.assert_not_called()
 
     def test_matches_only_role_assignment_events(self):
         self.assertTrue(self.handler.matches(pm.CREATED_EVENT))

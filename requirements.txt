@@ -9,4 +9,4 @@ Jinja2
 sentry-sdk
 keystoneauth1
 python-keystoneclient
-taynacclient>=1.2.0
+taynacclient>=1.6.0

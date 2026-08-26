@@ -36,8 +36,10 @@ project_membership_opts = [
         default="tenantmanager",
         help=(
             "Name of the keystone role that identifies a project's "
-            "tenant managers. The first user holding this role is used "
-            "as the message's primary recipient. Compared case-"
+            "tenant managers. Assignment changes for this role trigger "
+            "a notification, and users holding it count towards the "
+            "minimum of two recipients required to send. Should match "
+            "taynac's [identity] manager_role. Compared case-"
             "insensitively against role names from keystone."
         ),
     ),
@@ -46,8 +48,11 @@ project_membership_opts = [
         default="member",
         help=(
             "Name of the keystone role that identifies ordinary project "
-            "members. Users with this role (and tenantmanagers) are CC'd "
-            "on the notification. Compared case-insensitively."
+            "members. Assignment changes for this role trigger a "
+            "notification, and users holding it count towards the "
+            "minimum of two recipients required to send. Should match "
+            "taynac's [identity] member_role. Compared case-"
+            "insensitively."
         ),
     ),
     cfg.StrOpt(
@@ -76,15 +81,15 @@ class ProjectMembershipHandler(common.TaynacHandlerBase):
     1. Resolve the affected user/group, project, and role via keystone.
        Only the tenantmanager, member, and reader roles are notifiable;
        events for any other role are ignored.
-    2. Find the project's tenant managers and ordinary members (effective
-       assignments — group memberships are expanded to users).
-    3. Send **one** taynac message:
-        * ``recipient`` = first tenant manager (by keystone API order)
-        * ``cc`` = every other user holding the tenantmanager or member
-          role on the project
+    2. Build a table of the project's current members (effective
+       assignments — group memberships are expanded to users) for the
+       message body.
+    3. Send **one** taynac message with the project's id; taynac resolves
+       the recipients itself (first tenant manager as recipient, other
+       tenant managers and members CC'd).
 
-    If nobody would be CC'd (the tenant manager is the only recipient),
-    no message is sent.
+    If fewer than two users would be notified (counting enabled
+    tenantmanager/member users with an email), no message is sent.
     """
 
     event_types = [CREATED_EVENT, DELETED_EVENT]
@@ -141,42 +146,25 @@ class ProjectMembershipHandler(common.TaynacHandlerBase):
             target = ks.groups.get(target_group_id)
             target_kind = "group"
 
-        tenantmanagers, cc_users, members_table = (
-            self._collect_project_membership(ks, project_id)
-        )
-        if not tenantmanagers:
-            LOG.warning(
-                "No %s on project %s; skipping %s notification "
-                "(message_id=%s)",
-                CONF.project_membership.tenantmanager_role,
-                project_id,
-                event.event_type,
-                event.message_id,
-            )
-            return
+        members_table = self._members_table(ks, project_id)
 
-        primary = tenantmanagers[0]
-        primary_email = getattr(primary, "email", None)
-        if not primary_email:
-            LOG.warning(
-                "Primary tenant manager %s has no email; skipping %s "
-                "notification (message_id=%s)",
-                primary.id,
-                event.event_type,
-                event.message_id,
-            )
-            return
-
-        cc_emails = sorted(
-            {
-                u.email
-                for u in cc_users
-                if getattr(u, "email", None) and u.id != primary.id
-            }
+        # Taynac notifies the project's tenantmanager/member users. If
+        # fewer than two of them could receive email, keep the historical
+        # behaviour of not sending at all.
+        recipient_roles = {
+            CONF.project_membership.tenantmanager_role.lower(),
+            CONF.project_membership.member_role.lower(),
+        }
+        recipients = sum(
+            1
+            for row in members_table
+            if row["email"]
+            and recipient_roles & {r.lower() for r in row["roles"]}
         )
-        if not cc_emails:
+        if recipients < 2:
             LOG.debug(
-                "Skipping %s (message_id=%s): only one user would be notified",
+                "Skipping %s (message_id=%s): fewer than two users would "
+                "be notified",
                 event.event_type,
                 event.message_id,
             )
@@ -186,7 +174,6 @@ class ProjectMembershipHandler(common.TaynacHandlerBase):
 
         body = self.render(
             f"project_membership/{action}.html",
-            recipient_name=common.display_name(primary),
             target_name=common.display_name(target),
             target_kind=target_kind,
             project_name=project_name,
@@ -200,8 +187,7 @@ class ProjectMembershipHandler(common.TaynacHandlerBase):
             msg = taynac.messages.send(
                 subject=subject,
                 body=body,
-                recipient=primary_email,
-                cc=cc_emails,
+                project_id=project_id,
             )
         except Exception:
             LOG.exception(
@@ -216,33 +202,23 @@ class ProjectMembershipHandler(common.TaynacHandlerBase):
             "Sent project-membership %s message: to=%s cc=%d "
             "(backend_id=%s, project=%s, target=%s)",
             action,
-            primary_email,
-            len(cc_emails),
+            getattr(msg, "recipient", None),
+            len(getattr(msg, "cc", None) or []),
             getattr(msg, "backend_id", None),
             project_id,
             target.id,
         )
 
     @staticmethod
-    def _collect_project_membership(ks, project_id):
+    def _members_table(ks, project_id):
         """Single pass over the project's effective role assignments.
 
-        Returns ``(tenantmanagers, cc_users, members_table)``:
-
-        * ``tenantmanagers`` — User objects in keystone API order so
-          ``[0]`` is deterministic.
-        * ``cc_users`` — every user with the tenantmanager or member role,
-          deduplicated by id.
-        * ``members_table`` — list of ``{"name", "email", "roles"}`` dicts
-          covering every user holding any role on the project, sorted by
-          display name. ``roles`` is the deduped list of role names.
+        Returns a list of ``{"name", "email", "roles"}`` dicts covering
+        every enabled user holding any role on the project, sorted by
+        display name. ``roles`` is the deduped list of role names.
         """
-        tm_name = CONF.project_membership.tenantmanager_role.lower()
-        member_name = CONF.project_membership.member_role.lower()
-
         role_names = {}  # role_id -> role.name (original case)
         user_to_role_ids = {}  # user_id -> set of role_ids
-        tenantmanager_ids = []  # order-preserving
 
         for a in ks.role_assignments.list(project=project_id, effective=True):
             role_ref = getattr(a, "role", None)
@@ -256,41 +232,19 @@ class ProjectMembershipHandler(common.TaynacHandlerBase):
 
             if role_id not in role_names:
                 role_names[role_id] = ks.roles.get(role_id).name
-            normalized = role_names[role_id].lower()
 
             user_to_role_ids.setdefault(user_id, set()).add(role_id)
-
-            if normalized == tm_name and user_id not in tenantmanager_ids:
-                tenantmanager_ids.append(user_id)
 
         # Fetch each user once.
         user_cache = {uid: ks.users.get(uid) for uid in user_to_role_ids}
 
-        # Disabled keystone users can't read email and shouldn't be on the
-        # to/cc lists. Default to enabled when the attribute is missing.
-        def _enabled(uid):
-            return bool(getattr(user_cache[uid], "enabled", True))
-
-        tenantmanagers = [
-            user_cache[uid] for uid in tenantmanager_ids if _enabled(uid)
-        ]
-
-        cc_user_ids = {
-            uid
-            for uid, rids in user_to_role_ids.items()
-            if _enabled(uid)
-            and any(
-                role_names[rid].lower() in (tm_name, member_name)
-                for rid in rids
-            )
-        }
-        cc_users = [user_cache[uid] for uid in cc_user_ids]
-
         members_table = []
         for uid, rids in user_to_role_ids.items():
-            if not _enabled(uid):
-                continue
             user = user_cache[uid]
+            # Disabled keystone users shouldn't be listed. Default to
+            # enabled when the attribute is missing.
+            if not getattr(user, "enabled", True):
+                continue
             members_table.append(
                 {
                     "name": common.display_name(user),
@@ -300,4 +254,4 @@ class ProjectMembershipHandler(common.TaynacHandlerBase):
             )
         members_table.sort(key=lambda row: row["name"].lower())
 
-        return tenantmanagers, cc_users, members_table
+        return members_table
