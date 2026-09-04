@@ -10,3 +10,4 @@ sentry-sdk
 keystoneauth1
 python-keystoneclient
 taynacclient>=1.6.0
+nectar-health-probe>=1.0.2
